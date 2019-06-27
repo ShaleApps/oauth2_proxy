@@ -1,7 +1,8 @@
 package main
 
 import (
-	"flag"
+	"github.com/ShaleApps/oauth2_proxy/logger"
+	flag "github.com/spf13/pflag"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -12,23 +13,18 @@ import (
 
 	"github.com/BurntSushi/toml"
 	options "github.com/mreiferson/go-options"
-	"github.com/pusher/oauth2_proxy/logger"
+	"github.com/ShaleApps/log"
 )
 
-func main() {
-	logger.SetFlags(logger.Lshortfile)
-	flagSet := flag.NewFlagSet("oauth2_proxy", flag.ExitOnError)
+var (
+	emailDomains, whitelistDomains, upstreams, skipAuthRegex, jwtIssuers, googleGroups, redisSentinelConnectionURLs []string
+	showVersion *bool
+	flagSet = flag.CommandLine
 
-	emailDomains := StringArray{}
-	whitelistDomains := StringArray{}
-	upstreams := StringArray{}
-	skipAuthRegex := StringArray{}
-	jwtIssuers := StringArray{}
-	googleGroups := StringArray{}
-	redisSentinelConnectionURLs := StringArray{}
+)
 
-	config := flagSet.String("config", "", "path to config file")
-	showVersion := flagSet.Bool("version", false, "print version string")
+func init() {
+	showVersion = flagSet.Bool("version", false, "print version string")
 
 	flagSet.String("http-address", "127.0.0.1:4180", "[http://]<addr>:<port> or unix://<path> to listen on for HTTP clients")
 	flagSet.String("https-address", ":443", "<addr>:<port> to listen on for HTTPS clients")
@@ -36,7 +32,7 @@ func main() {
 	flagSet.String("tls-key", "", "path to private key file")
 	flagSet.String("redirect-url", "", "the OAuth Redirect URL. ie: \"https://internalapp.yourcompany.com/oauth2/callback\"")
 	flagSet.Bool("set-xauthrequest", false, "set X-Auth-Request-User and X-Auth-Request-Email response headers (useful in Nginx auth_request mode)")
-	flagSet.Var(&upstreams, "upstream", "the http url(s) of the upstream endpoint or file:// paths for static files. Routing is based on the path")
+	flagSet.StringSliceVar(&upstreams, "upstream", nil, "the http url(s) of the upstream endpoint or file:// paths for static files. Routing is based on the path")
 	flagSet.Bool("pass-basic-auth", true, "pass HTTP Basic Auth, X-Forwarded-User and X-Forwarded-Email information to upstream")
 	flagSet.Bool("pass-user-headers", true, "pass X-Forwarded-User and X-Forwarded-Email information to upstream")
 	flagSet.String("basic-auth-password", "", "the password to set when passing the HTTP Basic Auth header")
@@ -44,20 +40,20 @@ func main() {
 	flagSet.Bool("pass-host-header", true, "pass the request Host Header to upstream")
 	flagSet.Bool("pass-authorization-header", false, "pass the Authorization Header to upstream")
 	flagSet.Bool("set-authorization-header", false, "set Authorization response headers (useful in Nginx auth_request mode)")
-	flagSet.Var(&skipAuthRegex, "skip-auth-regex", "bypass authentication for requests path's that match (may be given multiple times)")
+	flagSet.StringSliceVar(&skipAuthRegex, "skip-auth-regex",  nil, "bypass authentication for requests path's that match (may be given multiple times)")
 	flagSet.Bool("skip-provider-button", false, "will skip sign-in-page to directly reach the next step: oauth/start")
 	flagSet.Bool("skip-auth-preflight", false, "will skip authentication for OPTIONS requests")
 	flagSet.Bool("ssl-insecure-skip-verify", false, "skip validation of certificates presented when using HTTPS")
 	flagSet.Duration("flush-interval", time.Duration(1)*time.Second, "period between response flushing when streaming responses")
 	flagSet.Bool("skip-jwt-bearer-tokens", false, "will skip requests that have verified JWT bearer tokens (default false)")
-	flagSet.Var(&jwtIssuers, "extra-jwt-issuers", "if skip-jwt-bearer-tokens is set, a list of extra JWT issuer=audience pairs (where the issuer URL has a .well-known/openid-configuration or a .well-known/jwks.json)")
+	flagSet.StringSliceVar(&jwtIssuers, "extra-jwt-issuers", nil, "if skip-jwt-bearer-tokens is set, a list of extra JWT issuer=audience pairs (where the issuer URL has a .well-known/openid-configuration or a .well-known/jwks.json)")
 
-	flagSet.Var(&emailDomains, "email-domain", "authenticate emails with the specified domain (may be given multiple times). Use * to authenticate any email")
-	flagSet.Var(&whitelistDomains, "whitelist-domain", "allowed domains for redirection after authentication. Prefix domain with a . to allow subdomains (eg .example.com)")
+	flagSet.StringSliceVar(&emailDomains, "email-domain", nil, "authenticate emails with the specified domain (may be given multiple times). Use * to authenticate any email")
+	flagSet.StringSliceVar(&whitelistDomains, "whitelist-domain", nil,"allowed domains for redirection after authentication. Prefix domain with a . to allow subdomains (eg .example.com)")
 	flagSet.String("azure-tenant", "common", "go to a tenant-specific or common (tenant-independent) endpoint.")
 	flagSet.String("github-org", "", "restrict logins to members of this organisation")
 	flagSet.String("github-team", "", "restrict logins to members of this team")
-	flagSet.Var(&googleGroups, "google-group", "restrict logins to members of this google group (may be given multiple times).")
+	flagSet.StringSliceVar(&googleGroups, "google-group", nil, "restrict logins to members of this google group (may be given multiple times).")
 	flagSet.String("google-admin-email", "", "the google admin to impersonate for api calls")
 	flagSet.String("google-service-account-json", "", "the path to the service account json credentials")
 	flagSet.String("client-id", "", "the OAuth Client ID: ie: \"123456.apps.googleusercontent.com\"")
@@ -83,7 +79,7 @@ func main() {
 	flagSet.String("redis-connection-url", "", "URL of redis server for redis session storage (eg: redis://HOST[:PORT])")
 	flagSet.Bool("redis-use-sentinel", false, "Connect to redis via sentinels. Must set --redis-sentinel-master-name and --redis-sentinel-connection-urls to use this feature")
 	flagSet.String("redis-sentinel-master-name", "", "Redis sentinel master name. Used in conjuction with --redis-use-sentinel")
-	flagSet.Var(&redisSentinelConnectionURLs, "redis-sentinel-connection-urls", "List of Redis sentinel connection URLs (eg redis://HOST[:PORT]). Used in conjuction with --redis-use-sentinel")
+	flagSet.StringSliceVar(&redisSentinelConnectionURLs, "redis-sentinel-connection-urls", nil,"List of Redis sentinel connection URLs (eg redis://HOST[:PORT]). Used in conjuction with --redis-use-sentinel")
 
 	flagSet.String("logging-filename", "", "File to log requests to, empty for stdout")
 	flagSet.Int("logging-max-size", 100, "Maximum size in megabytes of the log file before rotation")
@@ -119,8 +115,11 @@ func main() {
 	flagSet.String("jwt-key-file", "", "path to the private key file in PEM format used to sign the JWT so that you can say something like -jwt-key-file=/etc/ssl/private/jwt_signing_key.pem: required by login.gov")
 	flagSet.String("pubjwk-url", "", "JWK pubkey access endpoint: required by login.gov")
 	flagSet.Bool("gcp-healthchecks", false, "Enable GCP/GKE healthcheck endpoints")
+}
 
-	flagSet.Parse(os.Args[1:])
+func main() {
+
+	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("oauth2_proxy %s (built with %s)\n", VERSION, runtime.Version())
@@ -130,12 +129,6 @@ func main() {
 	opts := NewOptions()
 
 	cfg := make(EnvOptions)
-	if *config != "" {
-		_, err := toml.DecodeFile(*config, &cfg)
-		if err != nil {
-			logger.Fatalf("ERROR: failed to load config file %s - %s", *config, err)
-		}
-	}
 	cfg.LoadEnvForStruct(opts)
 	options.Resolve(opts, flagSet, cfg)
 
